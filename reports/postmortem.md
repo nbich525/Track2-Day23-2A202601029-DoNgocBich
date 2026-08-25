@@ -1,46 +1,47 @@
-# Postmortem ? DR Drill Lab 23
+# Postmortem — DR Drill Lab 23
 
-Theo ??ng template ?4 "Sau Failover: Blameless Postmortem". Blameless: c?u h?i l?
-"h? th?ng/process n?o cho ph?p chuy?n n?y", kh?ng ph?i "ai l?m sai".
+Theo đúng template §4 "Sau Failover: Blameless Postmortem". Blameless: câu hỏi là
+"hệ thống/process nào cho phép chuyện này", không phải "ai làm sai".
 
-## 1. Timeline (m?i d?ng ph?i c? evidence path:line)
+## 1. Timeline (mọi dòng phải có evidence path:line)
 
-| ISO time | S? ki?n | Evidence |
-|---|---|---|
-| 2026-08-25T13:29:37 | outage b?t ??u | `chaos/chaos-events.jsonl:3` |
-| 2026-08-25T13:29:37 | user ??u ti?n b? ?nh h??ng (+0.1s) | `reports/drill-2-withdr.jsonl:81` |
-| 2026-08-25T13:29:56 | health check alert (+19.6s) | `reports/health-events.jsonl:2` |
-| 2026-08-25T13:30:25 | operator confirm cutover | `reports/runbook-run.jsonl:2` |
-| 2026-08-25T13:30:32 | resolved, request ??u ti?n OK t? region B (+57.2s) | `reports/drill-2-withdr.jsonl:109` |
+| ISO time            | Sự kiện                                              | Evidence                             |
+| ------------------- | ------------------------------------------------------ | ------------------------------------ |
+| 2026-08-25T13:29:37 | outage bắt đầu                                      | `chaos/chaos-events.jsonl:3`       |
+| 2026-08-25T13:29:37 | user đầu tiên bị ảnh hưởng (+0.1s)              | `reports/drill-2-withdr.jsonl:81`  |
+| 2026-08-25T13:29:56 | health check alert (+19.6s)                            | `reports/health-events.jsonl:2`    |
+| 2026-08-25T13:30:25 | operator confirm cutover                               | `reports/runbook-run.jsonl:2`      |
+| 2026-08-25T13:30:34 | resolved, request đầu tiên OK từ region B (+57.2s) | `reports/drill-2-withdr.jsonl:109` |
 
-## 2. RTO/RPO ?o ???c vs m?c ti?u ? gap ? b??c n?o?
+## 2. RTO/RPO đo được vs mục tiêu — gap ở bước nào?
 
-- RTO m?c ti?u: 300s ? ?o ???c: `57.2s` ? gap: `242.8s`
-- RPO m?c ti?u: 300s ? ?o ???c: `20.0s` (`10` doc b? m?t) ? gap: `280.0s`
-- **B??c t?n nhi?u gi?y nh?t:** operator response v? timeout sau alert, kho?ng 29.0s trong kho?ng t? alert ??n runbook; GPU warm-up l? b??c t? ??ng l?n nh?t v?i 6.12s (`reports/failover-events.jsonl:4`).
+- RTO mục tiêu: 300s · đo được: `57.2s` · gap: `242.8s`
+- RPO mục tiêu: 300s · đo được: `20.0s` (`10` doc bị mất) · gap: `280.0s`
+- **Bước tốn nhiều giây nhất:** operator response và timeout sau alert, khoảng 29.0s trong khoảng từ alert đến runbook; GPU warm-up là bước tự động lớn nhất với 6.12s (`reports/failover-events.jsonl:4`).
 
 ## 3. Root cause (5 whys)
 
-Kh?ng ph?i "v? t?i ch?y chaos script". C?u h?i: *n?u ??y l? outage th?t, b??c n?o
-1. V? edge ti?p t?c route v?o Region A cho ??n khi DNS cutover ho?n t?t.
-2. V? health checker c?n ba failure li?n ti?p v?i interval 5s ?? ch?ng flapping.
-3. V? sau alert v?n c? ?? tr? operator tr??c khi b?t ??u runbook.
-4. V? quy tr?nh ch?a c? auto-page/ack deadline cho alert ?? x?c nh?n.
-5. V? ownership v? SLO cho b??c t? alert ??n x?c nh?n ch?a ???c ??nh ngh?a trong v?n h?nh.
+Không phải "vì tôi chạy chaos script". Câu hỏi: *nếu đây là outage thật, bước nào
 
-Root cause h? th?ng: c? ch? DR ?? c? health threshold v? automation, nh?ng quy tr?nh
-th?ng b?o/acknowledgement ch?a t? ??ng h?a; replication c?ng cho ph?p m?t 20.0s d? li?u.
+1. Vì edge tiếp tục route vào Region A cho đến khi DNS cutover hoàn tất.
+2. Vì health checker cần ba failure liên tiếp với interval 5s để chống flapping.
+3. Vì sau alert vẫn có độ trễ operator trước khi bắt đầu runbook.
+4. Vì quy trình chưa có auto-page/ack deadline cho alert đã xác nhận.
+5. Vì ownership và SLO cho bước từ alert đến xác nhận chưa được định nghĩa trong vận hành.
 
-## 4. Action items (c? owner + deadline)
+Root cause hệ thống: cơ chế DR đã có health threshold và automation, nhưng quy trình
+thông báo/acknowledgement chưa tự động hóa; replication cũng cho phép mất 20.0s dữ liệu.
 
-| # | Action | Owner | Deadline | Gi?m RTO/RPO bao nhi?u gi?y |
-|---|---|---|---|---|
-| 1 | Th?m paging v? escalation n?u ch?a x?c nh?n trong 60s; theo d?i alert-to-runbook | SRE on-call | 2026-09-01 | gi?m ph?n operator response, m?c ti?u 20-30s |
-| 2 | Gi?m replication interval t? 30s sau khi ?o chi ph? l?u tr?; c?nh b?o khi RPO v??t 10s | Data platform owner | 2026-09-08 | gi?m t?i ?a kho?ng 20s RPO |
+## 4. Action items (có owner + deadline)
 
-## 5. Ba c?u h?i b?t bu?c tr? l?i
+| # | Action                                                                                           | Owner               | Deadline   | Giảm RTO/RPO bao nhiêu giây                   |
+| - | ------------------------------------------------------------------------------------------------ | ------------------- | ---------- | ------------------------------------------------ |
+| 1 | Thêm paging và escalation nếu chưa xác nhận trong 60s; theo dõi alert-to-runbook          | SRE on-call         | 2026-09-01 | giảm phần operator response, mục tiêu 20-30s |
+| 2 | Giảm replication interval từ 30s sau khi đo chi phí lưu trữ; cảnh báo khi RPO vượt 10s | Data platform owner | 2026-09-08 | giảm tối đa khoảng 20s RPO                   |
 
-1. `interval ? threshold` l? `5 ? 3 = 15.0s`; chi?m kho?ng `26.2%` c?a RTO `57.2s`.
-2. N?u h? interval xu?ng 1s, detection floor l? thuy?t gi?m `12.0s`, nh?ng t?ng request/alert noise v? nguy c? flapping; threshold ho?c circuit breaker v?n ph?i gi?.
-3. N?u outage k?o d?i 6 gi? v? region ch?nh m?t d? li?u v?nh vi?n, `docs_lost` l? s? document ?? ???c ghi ? primary nh?ng kh?ng c? trong snapshot restore. Trong drill n?y l? `10`, t?c kh?ch h?ng c? th? m?t 10 document m?i nh?t; kh?ng ph?i s? gi? outage.
-   b?n c? ngh?a g? v?i kh?ch h?ng?
+## 5. Ba câu hỏi bắt buộc trả lời
+
+1. `interval × threshold` là `5 × 3 = 15.0s`; chiếm khoảng `26.2%` của RTO `57.2s`.
+2. Nếu hạ interval xuống 1s, detection floor lý thuyết giảm `12.0s`, nhưng tăng request/alert noise và nguy cơ flapping; threshold hoặc circuit breaker vẫn phải giữ.
+3. Nếu outage kéo dài 6 giờ và region chính mất dữ liệu vĩnh viễn, `docs_lost` là số document đã được ghi ở primary nhưng không có trong snapshot restore. Trong drill này là `10`, tức khách hàng có thể mất 10 document mới nhất; không phải số giờ outage.
+   bạn có nghĩa gì với khách hàng?
