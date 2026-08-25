@@ -26,6 +26,7 @@ PHẢI truyền `--backend bare` tường minh, nếu không nó mặc định `
 trên máy không có Docker daemon (`docker compose ... start` thất bại).
 """
 import argparse
+import ctypes
 import json
 import os
 import pathlib
@@ -38,6 +39,36 @@ import httpx
 EVENTS = pathlib.Path("chaos/chaos-events.jsonl")
 PID_DIR = pathlib.Path("run")
 URL = {"a": "http://127.0.0.1:8001", "b": "http://127.0.0.1:8002"}
+
+
+def suspend_process(pid: int):
+    if os.name != "nt":
+        os.kill(pid, signal.SIGSTOP)
+        return
+    process = ctypes.windll.kernel32.OpenProcess(0x0800, False, pid)
+    if not process:
+        raise OSError(f"khong mo duoc process {pid}")
+    try:
+        status = ctypes.windll.ntdll.NtSuspendProcess(process)
+        if status != 0:
+            raise OSError(f"NtSuspendProcess that bai: {status}")
+    finally:
+        ctypes.windll.kernel32.CloseHandle(process)
+
+
+def resume_process(pid: int):
+    if os.name != "nt":
+        os.kill(pid, signal.SIGCONT)
+        return
+    process = ctypes.windll.kernel32.OpenProcess(0x0800, False, pid)
+    if not process:
+        raise OSError(f"khong mo duoc process {pid}")
+    try:
+        status = ctypes.windll.ntdll.NtResumeProcess(process)
+        if status != 0:
+            raise OSError(f"NtResumeProcess that bai: {status}")
+    finally:
+        ctypes.windll.kernel32.CloseHandle(process)
 
 
 def event(**kw):
@@ -65,14 +96,31 @@ def is_alive(region: str, timeout=1.5) -> bool:
 
 def pid_of(region: str) -> int | None:
     f = PID_DIR / f"region-{region}.pid"
-    if not f.exists():
-        return None
-    pid = int(f.read_text().strip())
+    if f.exists():
+        try:
+            pid = int(f.read_text().strip())
+            os.kill(pid, 0)
+            return pid
+        except (OSError, ValueError):
+            pass
+
+    # Git Bash can record an MSYS PID while the listening process has a
+    # different Windows PID. Resolve the PID from the bound region port.
+    port = {"a": 8001, "b": 8002}[region]
     try:
-        os.kill(pid, 0)
-        return pid
+        output = subprocess.run(["netstat", "-ano"], capture_output=True,
+                                text=True, check=False).stdout
     except OSError:
         return None
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) >= 5 and fields[0].upper() == "TCP":
+            if fields[1].endswith(f":{port}") and fields[3].upper() == "LISTENING":
+                try:
+                    return int(fields[4])
+                except ValueError:
+                    return None
+    return None
 
 
 def kill(region: str, mode: str, backend: str, force_both: bool, mock: bool):
@@ -96,7 +144,10 @@ def kill(region: str, mode: str, backend: str, force_both: bool, mock: bool):
         # netblock: SIGSTOP -> TCP handshake vẫn xong nhưng không ai trả lời => request TREO
         #           (đúng hành vi của iptables DROP ở tầng app)
         # stop    : SIGKILL -> cổng đóng => ConnectError ngay
-        os.kill(pid, signal.SIGSTOP if mode == "netblock" else signal.SIGKILL)
+        if mode == "netblock":
+            suspend_process(pid)
+        else:
+            os.kill(pid, signal.SIGKILL)
     else:
         svc = f"serving-{region}"
         if mode == "stop":
@@ -111,7 +162,7 @@ def restore(region: str, backend: str):
     if backend == "bare":
         pid = pid_of(region)
         if pid:
-            os.kill(pid, signal.SIGCONT)
+            resume_process(pid)
             return event(action="restore", region=region, method="SIGCONT", pid=pid)
         return event(action="restore", region=region, method="need_manual_start",
                      note="process da bi SIGKILL, chay `make up-bare` lai")
